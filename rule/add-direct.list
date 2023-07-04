@@ -2,5 +2,5 @@ DOMAIN-SUFFIX,dbz98.com
 DOMAIN-SUFFIX,calo.run
 DOMAIN-SUFFIX,speedruns.win
 # Steam
-DOMAIN,steamcdn-a.akamaihd.net,DIRECT
-DOMAIN-SUFFIX,steamserver.net,DIRECT
+DOMAIN,steamcdn-a.akamaihd.net
+DOMAIN-SUFFIX,steamserver.net
