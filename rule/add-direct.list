@@ -1,9 +1,6 @@
 DOMAIN-SUFFIX,hoteldongfang.com
+DOMAIN-SUFFIX,dbz98.com
 #腾讯微云
 IP-CIDR,129.226.0.0/16,no-resolve
 IP-CIDR,43.154.0.0/16,no-resolve
 DOMAIN-SUFFIX,weixinbridge.com
-DOMAIN-SUFFIX,dbz98.com
-# Steam
-DOMAIN,steamcdn-a.akamaihd.net
-DOMAIN-SUFFIX,steamserver.net
