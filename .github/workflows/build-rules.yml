@@ -1,13 +1,15 @@
-# GitHub Actions：规则集 MRS 构建（每天一次）
-# 把 blackmatrix7 release 源拉下来，4 个 domain/ipcidr 转 mrs，
-# 3 个 classical 原样保留，产物 commit 到本仓库 rule/mrs/ 子目录。
-# 服务器只需 curl 本仓库 raw 的 7 个成品，不再需要 mihomo 二进制。
-# 仓库：EndDream/myproxy（公开），产物路径 rule/mrs/，不影响 rule/ 下已有的自定义规则。
+# GitHub Actions：规则集 MRS 构建（每天一次，三源各取所需）
+# 三个上游源 → 统一转 mrs / 保留 yaml → 产物 commit 到本仓库 rule/mrs/。
+#   1) blackmatrix7 release : 国区细分 + 全球/私网/广告
+#   2) MetaCubeX/meta-rules-dat meta 分支 : cn/geolocation-!cn 官方 mrs（直接下载）
+#   3) Loyalsoldier/clash-rules release : reject/apple/tld-not-cn yaml → mrs
+# 服务器只需 curl 本仓库 raw 的成品，不需要 mihomo 二进制。
+# 仓库：EndDream/myproxy（公开），产物路径 rule/mrs/，不影响 rule/ 下的自定义规则。
 name: Build rule sets (MRS)
 
 on:
   schedule:
-    # 每天 UTC 18:30 = 北京时间次日 02:30（错开 bm7 release 更新高峰）
+    # 每天 UTC 18:30 = 北京时间次日 02:30（错开各源更新高峰）
     - cron: '30 18 * * *'
   workflow_dispatch: # 允许手动触发
 
@@ -33,7 +35,7 @@ jobs:
           chmod +x mihomo
           ./mihomo -v | head -1
 
-      - name: Fetch sources (release branch)
+      - name: Fetch blackmatrix7 sources (release branch)
         run: |
           mkdir -p src rule/mrs
           BASE=https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/release/rule/Clash
@@ -47,22 +49,40 @@ jobs:
           curl -fsSL --retry 3 -o src/Lan.yaml                       $BASE/Lan/Lan.yaml
           wc -c src/*
 
-      - name: Convert domain/ipcidr -> mrs
+      - name: Fetch meta + Loyalsoldier sources
         run: |
           set -e
+          META=https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo
+          curl -fsSL --retry 3 -o rule/mrs/Meta_CN_Domain.mrs      $META/geosite/cn.mrs
+          curl -fsSL --retry 3 -o rule/mrs/Meta_CN_IP.mrs          $META/geoip/cn.mrs
+          curl -fsSL --retry 3 -o rule/mrs/Meta_Global_Domain.mrs  'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/geolocation-%21cn.mrs'
+          LO=https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release
+          curl -fsSL --retry 3 -o src/Reject.txt     $LO/reject.txt
+          curl -fsSL --retry 3 -o src/Apple.txt      $LO/apple.txt
+          curl -fsSL --retry 3 -o src/TldNotCN.txt   $LO/tld-not-cn.txt
+          wc -c src/Reject.txt src/Apple.txt src/TldNotCN.txt
+
+      - name: Convert sources -> mrs
+        run: |
+          set -e
+          # bm7 domain/ipcidr -> mrs
           ./mihomo convert-ruleset domain  text src/Global_Domain.txt           rule/mrs/Global_Domain.mrs
           ./mihomo convert-ruleset domain  text src/ChinaMax_Domain.txt         rule/mrs/ChinaMax_Domain.mrs
           ./mihomo convert-ruleset ipcidr  text src/ChinaMax_IP.txt             rule/mrs/ChinaMax_IP.mrs
           ./mihomo convert-ruleset domain  text src/AdvertisingLite_Domain.txt  rule/mrs/AdvertisingLite_Domain.mrs
-          # 3 个 classical 原样保留
+          # bm7 3 个 classical 原样保留
           cp src/Global.yaml          rule/mrs/Global.yaml
           cp src/AdvertisingLite.yaml rule/mrs/AdvertisingLite.yaml
           cp src/Lan.yaml             rule/mrs/Lan.yaml
+          # Loyalsoldier yaml(payload) -> mrs
+          ./mihomo convert-ruleset domain yaml src/Reject.txt     rule/mrs/LoyalReject.mrs
+          ./mihomo convert-ruleset domain yaml src/Apple.txt      rule/mrs/Apple.mrs
+          ./mihomo convert-ruleset domain yaml src/TldNotCN.txt   rule/mrs/TldNotCN.mrs
 
-      - name: Verify artifacts (magic + size + mihomo load)
+      - name: Verify artifacts (magic + size + mihomo decode)
         run: |
           set -e
-          # 1) mrs 魔数必须是 zstd: 28 b5 2f fd
+          # 1) 所有 mrs 魔数必须是 zstd: 28 b5 2f fd
           for f in rule/mrs/*.mrs; do
             magic=$(od -An -tx1 -N4 "$f" | tr -d ' \n')
             [ "$magic" = "28b52ffd" ] || { echo "BAD MAGIC $f: $magic"; exit 1; }
@@ -70,19 +90,31 @@ jobs:
             [ "$sz" -gt 100 ] || { echo "TOO SMALL $f: $sz"; exit 1; }
             echo "OK $f ($sz bytes, zstd)"
           done
-          # 2) 用 mihomo 反解验证（转成 text 再数行数，防坏文件）；behavior 必须与原文件一致
-          for f in Global_Domain.mrs ChinaMax_Domain.mrs AdvertisingLite_Domain.mrs; do
+          # 2) mihomo 反解验证（防坏文件/空文件）
+          for spec in \
+            "domain Global_Domain.mrs" \
+            "domain ChinaMax_Domain.mrs" \
+            "ipcidr ChinaMax_IP.mrs" \
+            "domain AdvertisingLite_Domain.mrs" \
+            "domain LoyalReject.mrs" \
+            "domain Apple.mrs" \
+            "domain TldNotCN.mrs" \
+            "domain Meta_CN_Domain.mrs" \
+            "ipcidr Meta_CN_IP.mrs" \
+            "domain Meta_Global_Domain.mrs"; do
+            set -- $spec
+            behavior=$1; f=$2
             out="/tmp/${f%.mrs}.verify.txt"
-            ./mihomo convert-ruleset domain mrs "rule/mrs/$f" "$out" >/dev/null 2>&1 || { echo "DECODE FAIL $f"; exit 1; }
+            ./mihomo convert-ruleset "$behavior" mrs "rule/mrs/$f" "$out" >/dev/null 2>&1 || { echo "DECODE FAIL $f"; exit 1; }
             lines=$(wc -l < "$out")
-            [ "$lines" -gt 100 ] || { echo "TOO FEW LINES $f: $lines"; exit 1; }
+            case "$f" in
+              Apple.mrs) min=100 ;;
+              TldNotCN.mrs) min=500 ;;
+              *) min=1000 ;;
+            esac
+            [ "$lines" -gt "$min" ] || { echo "TOO FEW LINES $f: $lines (min $min)"; exit 1; }
             echo "  decode $f: $lines lines"
           done
-          out=/tmp/ChinaMax_IP.verify.txt
-          ./mihomo convert-ruleset ipcidr mrs rule/mrs/ChinaMax_IP.mrs "$out" >/dev/null 2>&1 || { echo "DECODE FAIL ChinaMax_IP.mrs"; exit 1; }
-          lines=$(wc -l < "$out")
-          [ "$lines" -gt 100 ] || { echo "TOO FEW LINES ChinaMax_IP.mrs: $lines"; exit 1; }
-          echo "  decode ChinaMax_IP.mrs: $lines lines"
           ls -la rule/mrs/
 
       - name: Commit artifacts
