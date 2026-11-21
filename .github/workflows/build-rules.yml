@@ -1,0 +1,100 @@
+# GitHub Actions：规则集 MRS 构建（每天一次）
+# 把 blackmatrix7 release 源拉下来，4 个 domain/ipcidr 转 mrs，
+# 3 个 classical 原样保留，产物 commit 到本仓库 rule/mrs/ 子目录。
+# 服务器只需 curl 本仓库 raw 的 7 个成品，不再需要 mihomo 二进制。
+# 仓库：EndDream/myproxy（公开），产物路径 rule/mrs/，不影响 rule/ 下已有的自定义规则。
+name: Build rule sets (MRS)
+
+on:
+  schedule:
+    # 每天 UTC 18:30 = 北京时间次日 02:30（错开 bm7 release 更新高峰）
+    - cron: '30 18 * * *'
+  workflow_dispatch: # 允许手动触发
+
+permissions:
+  contents: write   # 需要提交产物
+
+concurrency:
+  group: build-rules
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download mihomo (v1.19.34 linux amd64)
+        run: |
+          curl -fsSL -o mihomo.gz \
+            https://github.com/MetaCubeX/mihomo/releases/download/v1.19.34/mihomo-linux-amd64-v1.19.34.gz
+          gzip -df mihomo.gz
+          chmod +x mihomo
+          ./mihomo -v | head -1
+
+      - name: Fetch sources (release branch)
+        run: |
+          mkdir -p src rule/mrs
+          BASE=https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/release/rule/Clash
+          set -e
+          curl -fsSL --retry 3 -o src/Global.yaml                    $BASE/Global/Global.yaml
+          curl -fsSL --retry 3 -o src/Global_Domain.txt              $BASE/Global/Global_Domain.txt
+          curl -fsSL --retry 3 -o src/ChinaMax_Domain.txt            $BASE/ChinaMax/ChinaMax_Domain.txt
+          curl -fsSL --retry 3 -o src/ChinaMax_IP.txt                $BASE/ChinaMax/ChinaMax_IP.txt
+          curl -fsSL --retry 3 -o src/AdvertisingLite.yaml           $BASE/AdvertisingLite/AdvertisingLite.yaml
+          curl -fsSL --retry 3 -o src/AdvertisingLite_Domain.txt     $BASE/AdvertisingLite/AdvertisingLite_Domain.txt
+          curl -fsSL --retry 3 -o src/Lan.yaml                       $BASE/Lan/Lan.yaml
+          wc -c src/*
+
+      - name: Convert domain/ipcidr -> mrs
+        run: |
+          set -e
+          ./mihomo convert-ruleset domain  text src/Global_Domain.txt           rule/mrs/Global_Domain.mrs
+          ./mihomo convert-ruleset domain  text src/ChinaMax_Domain.txt         rule/mrs/ChinaMax_Domain.mrs
+          ./mihomo convert-ruleset ipcidr  text src/ChinaMax_IP.txt             rule/mrs/ChinaMax_IP.mrs
+          ./mihomo convert-ruleset domain  text src/AdvertisingLite_Domain.txt  rule/mrs/AdvertisingLite_Domain.mrs
+          # 3 个 classical 原样保留
+          cp src/Global.yaml          rule/mrs/Global.yaml
+          cp src/AdvertisingLite.yaml rule/mrs/AdvertisingLite.yaml
+          cp src/Lan.yaml             rule/mrs/Lan.yaml
+
+      - name: Verify artifacts (magic + size + mihomo load)
+        run: |
+          set -e
+          # 1) mrs 魔数必须是 zstd: 28 b5 2f fd
+          for f in rule/mrs/*.mrs; do
+            magic=$(od -An -tx1 -N4 "$f" | tr -d ' \n')
+            [ "$magic" = "28b52ffd" ] || { echo "BAD MAGIC $f: $magic"; exit 1; }
+            sz=$(stat -c %s "$f")
+            [ "$sz" -gt 100 ] || { echo "TOO SMALL $f: $sz"; exit 1; }
+            echo "OK $f ($sz bytes, zstd)"
+          done
+          # 2) 用 mihomo 反解验证（转成 text 再数行数，防坏文件）；behavior 必须与原文件一致
+          for f in Global_Domain.mrs ChinaMax_Domain.mrs AdvertisingLite_Domain.mrs; do
+            out="/tmp/${f%.mrs}.verify.txt"
+            ./mihomo convert-ruleset domain mrs "rule/mrs/$f" "$out" >/dev/null 2>&1 || { echo "DECODE FAIL $f"; exit 1; }
+            lines=$(wc -l < "$out")
+            [ "$lines" -gt 100 ] || { echo "TOO FEW LINES $f: $lines"; exit 1; }
+            echo "  decode $f: $lines lines"
+          done
+          out=/tmp/ChinaMax_IP.verify.txt
+          ./mihomo convert-ruleset ipcidr mrs rule/mrs/ChinaMax_IP.mrs "$out" >/dev/null 2>&1 || { echo "DECODE FAIL ChinaMax_IP.mrs"; exit 1; }
+          lines=$(wc -l < "$out")
+          [ "$lines" -gt 100 ] || { echo "TOO FEW LINES ChinaMax_IP.mrs: $lines"; exit 1; }
+          echo "  decode ChinaMax_IP.mrs: $lines lines"
+          ls -la rule/mrs/
+
+      - name: Commit artifacts
+        run: |
+          git config user.name  "rules-bot"
+          git config user.email "rules-bot@users.noreply.github.com"
+          git add rule/mrs/
+          if git diff --cached --quiet; then
+            echo "No rule changes, skip commit."
+          else
+            echo "Rule changes detected:"
+            git diff --cached --stat
+            git commit -m "chore: update rule sets $(date -u +%Y-%m-%dT%H:%MZ)"
+            git push
+          fi
