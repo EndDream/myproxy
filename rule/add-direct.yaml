@@ -1,3 +1,6 @@
 payload:
   - DOMAIN-SUFFIX,dbz98.com
   - DOMAIN-SUFFIX,chattalk.win
+  # bm7 issue #1365 / #1382 建议的蒸汽平台下载 CDN（bm7 SteamCN 未采纳，2026-10-16 关闭 issue）
+  - DOMAIN-SUFFIX,steampipe-sc.akamaized.net
+  - DOMAIN-SUFFIX,gstore.val.manlaxy.com
